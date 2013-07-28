@@ -1,0 +1,124 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+import configparser
+import datetime
+import os
+import shutil
+import subprocess
+import sys
+
+
+class Environment(object):
+    def __init__(self):
+        self.PROG_DIR        = os.path.dirname(os.path.abspath(__file__))
+        self.TRIGGER_DIR     = os.path.join(self.PROG_DIR, 'trigger.d')
+        self.INIT_SCRIPT_DIR = os.path.join(self.PROG_DIR, 'init_script.d')
+        self.BLUEPRINT_DIR   = os.path.join(self.PROG_DIR, 'blueprint.d')
+        self.CONF_DIR        = os.path.join(self.PROG_DIR, 'conf.d')
+        self.LOG_DIR         = os.path.join(self.PROG_DIR, 'log.d')
+        self.CONF_SUFFIX     = '.cfg'
+        self.LOG_SUFFIX      = '.log'
+        self.init()
+
+    def init(self):
+        if not os.path.exists(self.LOG_DIR):
+            os.mkdir(self.LOG_DIR)
+
+
+class Preference(object):
+    def __init__(self, conf):
+        self.__conf = configparser.ConfigParser()
+        self.__conf.read(conf)
+        self.conf          = conf
+        self.src_dir    = self.__conf['Paths']['src_dir']
+        self.copy_from_to_list = eval(self.__conf['Paths']['copy_from_to_list'])
+
+
+class Builder(object):
+    def __init__(self, init_script, blueprint, src_dir):
+        self.init_script = init_script
+        self.blueprint   = blueprint
+        self.src_dir  = src_dir
+
+    def pre_build(self):
+        if os.path.isdir(self.src_dir):
+            return
+        os.makedirs(self.src_dir)
+        return subprocess.Popen(self.init_script, stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT, cwd=self.src_dir)
+
+    def build(self):
+        return subprocess.Popen(self.blueprint, stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT, cwd=self.src_dir)
+
+    def steps(self):
+        yield self.pre_build()
+        yield self.build()
+
+
+def cp(src, dest):
+    if os.path.isdir(src):
+        if os.path.isdir(dest):
+            dest = os.path.join(dest, os.path.basename(dest))
+        return shutil.copytree(src, dest)
+    return shutil.copy(src, dest)
+
+def wait_and_redirect_output(proc, output):
+    with open(output, 'ab') as f:
+        while True:
+            l = proc.stdout.readline()
+            if not l:
+                break
+            f.write(l)
+
+def main():
+    env = Environment()
+    date = str(datetime.date.today())
+
+    for trigger in os.listdir(env.TRIGGER_DIR):
+        if trigger.startswith('.'):
+            continue
+
+        conf = os.path.join(env.CONF_DIR, trigger + env.CONF_SUFFIX)
+        if not os.path.isfile(conf):
+            continue
+
+        init_script = os.path.join(env.INIT_SCRIPT_DIR, trigger)
+        if not os.path.isfile(init_script):
+            continue
+
+        blueprint = os.path.join(env.BLUEPRINT_DIR, trigger)
+        if not os.path.isfile(blueprint):
+            continue
+
+        pref = Preference(conf)
+
+        log = os.path.join(env.LOG_DIR, trigger + '-' + date + env.LOG_SUFFIX)
+        if os.path.exists(log):
+            os.remove(log)
+
+        replace_keyword = lambda s: s.format(date=date,
+                prog_dir=env.PROG_DIR, self=trigger, log=log)
+
+        builder = Builder(init_script, blueprint, replace_keyword(pref.src_dir))
+
+        for proc in builder.steps():
+            if not proc:
+                continue
+            wait_and_redirect_output(proc, log)
+
+        if pref.copy_from_to_list:
+            for src, dest in pref.copy_from_to_list:
+                src = replace_keyword(src)
+                dest = replace_keyword(dest)
+                if os.path.exists(src):
+                    try:
+                        cp(src, dest)
+                    except shutil.Error as err:
+                        print(err, file=sys.stderr)
+
+        os.remove(os.path.join(env.TRIGGER_DIR, trigger))
+
+if __name__ == '__main__':
+    main()
